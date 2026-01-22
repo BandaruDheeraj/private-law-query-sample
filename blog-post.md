@@ -164,6 +164,61 @@ Deploy **Azure Functions inside the workload VNet**. This serverless proxy:
 
 ---
 
+## How the Data Flows: Step by Step
+
+Understanding the exact data flow is key to this pattern. Here's how a query travels from SRE Agent to Log Analytics:
+
+```
+Azure SRE Agent (cloud service, outside VNet)
+        │
+        │ HTTPS call with Function Key
+        ▼
+Azure Function (func-law-query-ampls-demo)
+        │
+        │ ← VNet-integrated into "functions" subnet
+        │ ← vnetRouteAllEnabled: true (all traffic routes through VNet)
+        │ ← Uses Managed Identity for auth
+        │
+        ▼
+Private Endpoint (in "endpoints" subnet)
+        │
+        │ ← Connects to AMPLS in originations RG
+        │ ← DNS: privatelink.oms.opinsights.azure.com
+        │
+        ▼
+AMPLS (Azure Monitor Private Link Scope)
+        │
+        │ ← queryAccessMode: PrivateOnly
+        │
+        ▼
+Log Analytics Workspace (law-originations-ampls-demo)
+        │
+        │ ← publicNetworkAccessForQuery: Disabled
+        │
+        ✅ Query succeeds (came from Private Endpoint)
+```
+
+### Component Roles
+
+| Component | Location | Role |
+|-----------|----------|------|
+| **Azure Function** | Inside VNet (`functions` subnet) | Query proxy with public HTTPS endpoint and Managed Identity for LAW auth |
+| **Private Endpoint** | Inside VNet (`endpoints` subnet) | Connects to AMPLS, enables private network path to Log Analytics |
+| **AMPLS** | Originations RG | Links LAW to Private Endpoint, enforces PrivateOnly query mode |
+| **LAW** | Originations RG | Stores logs, blocks public queries, allows Private Endpoint queries |
+| **SRE Agent PythonTool** | Cloud (outside VNet) | Makes HTTP calls to Azure Function using Function Key |
+
+### The Key Insight
+
+The Azure Function acts as a **bridge** between two networks:
+
+1. **Public side**: The Function has a public HTTPS endpoint (`https://func-law-query-ampls-demo.azurewebsites.net`) that SRE Agent can call from anywhere
+2. **Private side**: The Function's VNet integration routes all outbound traffic through the VNet, where the Private Endpoint provides access to AMPLS-protected Log Analytics
+
+This is why the pattern works—the Function "translates" public API calls into private network queries.
+
+---
+
 ## Why This Pattern Works
 
 **Data ingestion** and **query access** use different network paths:
@@ -563,7 +618,19 @@ The workspace remains fully private; only the trusted Function can query it.
 
 | Resource | Link |
 |----------|------|
-| Sample Repository | [GitHub](https://github.com/BandaruDheeraj/private-law-query-sample) |
-| Azure Monitor Private Link | [Documentation](https://docs.microsoft.com/azure/azure-monitor/logs/private-link-security) |
-| Azure Functions VNet Integration | [Documentation](https://docs.microsoft.com/azure/azure-functions/functions-networking-options) |
-| Private VNet Sample (MCP) | [Related Sample](../private-vnet-observability/) |
+| 📦 **Sample Repository** | [github.com/BandaruDheeraj/private-law-query-sample](https://github.com/BandaruDheeraj/private-law-query-sample) |
+| 📖 Azure Monitor Private Link | [docs.microsoft.com/azure/azure-monitor/logs/private-link-security](https://docs.microsoft.com/azure/azure-monitor/logs/private-link-security) |
+| 🔗 Azure Functions VNet Integration | [docs.microsoft.com/azure/azure-functions/functions-networking-options](https://docs.microsoft.com/azure/azure-functions/functions-networking-options) |
+| 🛡️ AMPLS Design Guidance | [docs.microsoft.com/azure/azure-monitor/logs/private-link-design](https://docs.microsoft.com/azure/azure-monitor/logs/private-link-design) |
+| 🔐 Managed Identity for Azure Functions | [docs.microsoft.com/azure/app-service/overview-managed-identity](https://docs.microsoft.com/azure/app-service/overview-managed-identity) |
+| 🚀 Azure Developer CLI (azd) | [learn.microsoft.com/azure/developer/azure-developer-cli](https://learn.microsoft.com/azure/developer/azure-developer-cli/) |
+
+---
+
+## About the Author
+
+*Dheeraj Bandaru is a Senior Program Manager at Microsoft working on Azure SRE Agent. Follow for more patterns on AI-assisted operations and Azure infrastructure.*
+
+---
+
+**Tags**: `Azure Monitor` `Private Link` `AMPLS` `Azure Functions` `Log Analytics` `VNet Integration` `SRE` `DevOps` `Security`
