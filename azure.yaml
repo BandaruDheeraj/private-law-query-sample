@@ -1,0 +1,26 @@
+name: cross-subscription-ampls
+metadata:
+  template: azd-init
+
+services:
+  log-analytics-function:
+    project: ./src/log-analytics-function
+    host: function
+    language: python
+
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: ./scripts/postprovision.ps1
+    posix:
+      shell: sh
+      run: ./scripts/postprovision.sh
+  
+  postdeploy:
+    windows:
+      shell: pwsh
+      run: ./scripts/postdeploy.ps1
+    posix:
+      shell: sh
+      run: ./scripts/postdeploy.sh
