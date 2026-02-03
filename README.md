@@ -6,6 +6,27 @@ Demonstrate how Azure SRE Agent can query a Log Analytics Workspace protected by
 
 > ✅ **Tested on January 21, 2026**: Full integration test passed with Azure Functions querying private LAW through AMPLS.
 
+---
+
+## 📍 Quick Reference: Key File Locations
+
+| What You Need | Location | Description |
+|---------------|----------|-------------|
+| **🔧 Azure Function Code** | [`src/log-analytics-function/`](src/log-analytics-function/) | Python Azure Functions that query Log Analytics via Private Endpoint |
+| **🤖 Subagent YAML** | [`src/log-analytics-function/agents/CrossSubscriptionAMPLS/`](src/log-analytics-function/agents/CrossSubscriptionAMPLS/CrossSubscriptionAMPLS.yaml) | Copy this YAML into the **Subagent Builder UI** in Azure SRE Agent |
+| **🛠️ PythonTool Examples** | See [Creating Custom PythonTools](#creating-custom-pythontools-in-sre-agent) section below | Code examples for creating HTTP tools in the SRE Agent UI |
+
+### Function Endpoints (Azure Functions Code)
+
+| Function | File | Purpose |
+|----------|------|---------|
+| `query_logs` | [`src/log-analytics-function/query_logs/__init__.py`](src/log-analytics-function/query_logs/__init__.py) | Execute KQL queries against Log Analytics |
+| `list_tables` | [`src/log-analytics-function/list_tables/__init__.py`](src/log-analytics-function/list_tables/__init__.py) | List available tables in the workspace |
+| `check_vm_health` | [`src/log-analytics-function/check_vm_health/__init__.py`](src/log-analytics-function/check_vm_health/__init__.py) | Check VM heartbeat status |
+| `analyze_errors` | [`src/log-analytics-function/analyze_errors/__init__.py`](src/log-analytics-function/analyze_errors/__init__.py) | Analyze Syslog errors |
+
+---
+
 ## Scenario Overview
 
 **The Reality**: Log Analytics Workspaces cannot be created inside a VNet as a network resource. Azure Monitor uses public endpoints by default and requires **Azure Monitor Private Link Scopes (AMPLS)** together with **Private Endpoints** for private network access.
@@ -256,7 +277,7 @@ Create the subagent and tools directly in the Azure Portal:
 
 #### Option B: Use YAML Templates
 
-Reference the YAML templates in the [agents/CrossSubscriptionAMPLS](../../../../agents/CrossSubscriptionAMPLS/) directory for the complete configuration.
+Reference the YAML template in [`src/log-analytics-function/agents/CrossSubscriptionAMPLS/CrossSubscriptionAMPLS.yaml`](src/log-analytics-function/agents/CrossSubscriptionAMPLS/CrossSubscriptionAMPLS.yaml) for the complete subagent configuration. Copy the contents into the Subagent Builder UI.
 
 #### Configuring Function URL and Key
 
@@ -314,6 +335,234 @@ Open Azure SRE Agent and ask:
 - Using Private Endpoints to access AMPLS-protected workspaces
 - Configuring SRE Agent PythonTools as serverless query proxy
 - Separating concerns with resource groups (simulates cross-subscription pattern)
+
+## Creating Custom PythonTools in SRE Agent
+
+This section provides everything you need to create custom PythonTools in the Azure SRE Agent UI Builder.
+
+### Step 1: Navigate to the Tool Builder
+
+1. Open the **Azure Portal** and navigate to your **Azure SRE Agent** resource
+2. Go to **Builder** → **Subagent builder**
+3. Select your subagent (or create one first)
+4. Click **+ Add tool** → **PythonTool**
+
+### Step 2: Tool Configuration Fields
+
+When creating a PythonTool, you'll need to fill in these fields:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| **Name** | Unique tool identifier (snake_case recommended) | `CrossSubAMPLS_QueryLogs` |
+| **Description** | What the tool does (LLM uses this to decide when to call it) | `Execute KQL queries against a private Log Analytics workspace via Azure Function proxy` |
+| **Parameters** | Input parameters the tool accepts (JSON schema) | See below |
+| **Function Code** | Python code with `def main(**kwargs)` entry point | See examples below |
+
+### Step 3: Parameter Definition
+
+Define parameters as a JSON schema. Example for the QueryLogs tool:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The KQL query to execute against Log Analytics"
+    },
+    "timespan": {
+      "type": "string",
+      "description": "ISO 8601 duration (e.g., PT1H, P1D, P7D). Default: P1D"
+    }
+  },
+  "required": ["query"]
+}
+```
+
+### Step 4: Function Code Template
+
+All PythonTools **must** use `def main(**kwargs)` as the entry point:
+
+```python
+import json
+import urllib.request
+import urllib.error
+
+def main(**kwargs):
+    """
+    Query Log Analytics workspace via Azure Function proxy.
+    
+    Args:
+        query (str): KQL query to execute
+        timespan (str, optional): ISO 8601 duration like "PT1H", "P1D"
+    
+    Returns:
+        dict: Query results or error message
+    """
+    # Extract parameters
+    query = kwargs.get("query")
+    timespan = kwargs.get("timespan", "P1D")
+    
+    if not query:
+        return {"error": "Missing required parameter: query"}
+    
+    # Azure Function configuration
+    # ⚠️ Replace these with your actual values after deployment
+    FUNCTION_URL = "https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/query_logs"
+    FUNCTION_KEY = "<YOUR-FUNCTION-KEY>"
+    
+    # Build request
+    payload = json.dumps({
+        "query": query,
+        "timespan": timespan
+    }).encode("utf-8")
+    
+    headers = {
+        "Content-Type": "application/json",
+        "x-functions-key": FUNCTION_KEY
+    }
+    
+    try:
+        req = urllib.request.Request(FUNCTION_URL, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            return result
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.reason}", "details": e.read().decode()}
+    except urllib.error.URLError as e:
+        return {"error": f"Connection failed: {str(e.reason)}"}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+```
+
+### Complete PythonTool Examples
+
+#### CrossSubAMPLS_QueryLogs
+
+```python
+import json
+import urllib.request
+import urllib.error
+
+def main(**kwargs):
+    """Execute KQL queries against private Log Analytics workspace."""
+    query = kwargs.get("query")
+    timespan = kwargs.get("timespan", "P1D")
+    
+    if not query:
+        return {"error": "Missing required parameter: query"}
+    
+    FUNCTION_URL = "https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/query_logs"
+    FUNCTION_KEY = "<YOUR-FUNCTION-KEY>"
+    
+    payload = json.dumps({"query": query, "timespan": timespan}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "x-functions-key": FUNCTION_KEY}
+    
+    try:
+        req = urllib.request.Request(FUNCTION_URL, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+#### CrossSubAMPLS_ListTables
+
+```python
+import json
+import urllib.request
+import urllib.error
+
+def main(**kwargs):
+    """List available tables in the private Log Analytics workspace."""
+    FUNCTION_URL = "https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/list_tables"
+    FUNCTION_KEY = "<YOUR-FUNCTION-KEY>"
+    
+    headers = {"x-functions-key": FUNCTION_KEY}
+    
+    try:
+        req = urllib.request.Request(FUNCTION_URL, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+#### CrossSubAMPLS_CheckVMHealth
+
+```python
+import json
+import urllib.request
+import urllib.error
+
+def main(**kwargs):
+    """Check VM heartbeat and connectivity status."""
+    FUNCTION_URL = "https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/check_vm_health"
+    FUNCTION_KEY = "<YOUR-FUNCTION-KEY>"
+    
+    headers = {"x-functions-key": FUNCTION_KEY}
+    
+    try:
+        req = urllib.request.Request(FUNCTION_URL, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+#### CrossSubAMPLS_AnalyzeErrors
+
+```python
+import json
+import urllib.request
+import urllib.error
+
+def main(**kwargs):
+    """Analyze Syslog errors from the workspace."""
+    hours = kwargs.get("hours", 24)
+    
+    FUNCTION_URL = f"https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/analyze_errors?hours={hours}"
+    FUNCTION_KEY = "<YOUR-FUNCTION-KEY>"
+    
+    headers = {"x-functions-key": FUNCTION_KEY}
+    
+    try:
+        req = urllib.request.Request(FUNCTION_URL, headers=headers, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"error": str(e)}
+```
+
+### Important PythonTool Rules
+
+| Rule | Description |
+|------|-------------|
+| ✅ Use `def main(**kwargs)` | Required entry point signature |
+| ❌ Don't use `def execute()` | Will cause runtime errors |
+| ✅ Return `dict` or JSON-serializable | Results must be JSON-compatible |
+| ✅ Handle all exceptions | Wrap calls in try/except |
+| ✅ Use `urllib` for HTTP | Available in the sandbox environment |
+| ❌ Don't use `requests` library | Not available in sandbox |
+| ✅ Include timeouts | Prevent hanging on slow responses |
+
+### Where to Get Your Configuration Values
+
+| Value | How to Find It |
+|-------|----------------|
+| **Function App URL** | Azure Portal → Function App → Overview → URL |
+| **Function Key** | Azure Portal → Function App → App keys → Host keys → default |
+| **Workspace ID** | Azure Portal → Log Analytics Workspace → Properties → Workspace ID |
+
+---
 
 ## Azure Functions vs MCP Approach
 
