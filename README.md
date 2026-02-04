@@ -243,7 +243,7 @@ az role assignment create \
 ### 3. Inject the Failure
 
 ```powershell
-./inject-failure.ps1 -ResourceGroup "workload-rg"
+./scripts/inject-failure.ps1 -ResourceGroup "workload-rg"
 ```
 
 This simulates application issues on the workload VMs that will be logged to the Originations LAW.
@@ -323,8 +323,8 @@ Open Azure SRE Agent and ask:
 ### 6. Cleanup
 
 ```powershell
-./cleanup.ps1 -ResourceGroup "workload-rg"
-./cleanup.ps1 -ResourceGroup "originations-rg"
+./scripts/cleanup.ps1 -ResourceGroup "workload-rg"
+./scripts/cleanup.ps1 -ResourceGroup "originations-rg"
 ```
 
 ## What You'll Learn
@@ -674,3 +674,4 @@ The sample's storage account includes `allowBlobPublicAccess: false` to comply w
 - [Azure Monitor Private Link documentation](https://docs.microsoft.com/azure/azure-monitor/logs/private-link-security)
 - [Azure Functions VNet Integration](https://docs.microsoft.com/azure/azure-functions/functions-networking-options)
 - [Private VNet Observability Sample (MCP approach)](../private-vnet-observability/)
+
