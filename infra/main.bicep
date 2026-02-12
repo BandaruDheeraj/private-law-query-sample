@@ -106,6 +106,20 @@ module functionApp 'modules/function-app.bicep' = {
   ]
 }
 
+// Grant Log Analytics Reader to the Function App's managed identity
+// Scoped to the originations RG where the workspace lives
+module lawRoleAssignment 'modules/law-role-assignment.bicep' = {
+  name: 'law-role-assignment'
+  scope: originationsRg
+  params: {
+    workspaceName: 'law-originations-${environmentName}'
+    principalId: functionApp.outputs.principalId
+  }
+  dependsOn: [
+    logAnalytics
+  ]
+}
+
 // Deploy sample VMs in Workload RG
 module vms 'modules/vms.bicep' = {
   name: 'vms'
@@ -130,4 +144,5 @@ output AMPLS_ID string = ampls.outputs.amplsId
 output VNET_NAME string = vnet.outputs.vnetName
 output FUNCTION_APP_URL string = functionApp.outputs.functionAppUrl
 output FUNCTION_APP_NAME string = functionApp.outputs.functionAppName
-// Note: Retrieve function key with: az functionapp keys list --name <FUNCTION_APP_NAME> --resource-group <WORKLOAD_RESOURCE_GROUP> --query functionKeys.default -o tsv
+// Note: After deployment, configure Easy Auth on the Function App via Azure Portal.
+// See blog-post.md Step 5 for detailed instructions.

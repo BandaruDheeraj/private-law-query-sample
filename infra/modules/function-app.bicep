@@ -124,16 +124,10 @@ resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   }
 }
 
-// Grant Log Analytics Reader role to the Function App's managed identity
-resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(functionApp.id, workspaceResourceId, 'Log Analytics Reader')
-  scope: resourceGroup()
-  properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '73c42c96-874c-492b-b04d-ab87d138a893')
-    principalId: functionApp.identity.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// NOTE: The Log Analytics Reader role assignment is created in main.bicep,
+// scoped to the originations resource group where the workspace lives.
+// This ensures the Function App's managed identity can query the workspace
+// even though it's in a different resource group.
 
 output functionAppId string = functionApp.id
 output functionAppName string = functionApp.name

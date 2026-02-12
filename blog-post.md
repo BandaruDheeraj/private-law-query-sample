@@ -147,7 +147,7 @@ Deploy **Azure Functions inside the workload VNet**. This serverless proxy:
 │  └──────────────────────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────────┘
                                     │
-                                    │ HTTPS (REST API + Function Key)
+                                    │ HTTPS (REST API + Easy Auth Bearer Token)
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Azure SRE Agent                                     │
@@ -155,10 +155,11 @@ Deploy **Azure Functions inside the workload VNet**. This serverless proxy:
 │                                                                             │
 │  "Investigate errors on my workload VMs in the Originations LAW"           │
 │                                                                             │
-│  ✓ Calls Azure Function endpoints over HTTPS                               │
+│  ✓ Acquires Bearer Token via Managed Identity                              │
+│  ✓ Calls Azure Function endpoints over HTTPS with token                    │
 │  ✓ Function queries LAW via Private Endpoint                               │
 │  ✓ Results returned to agent for analysis                                  │
-│  ✓ No direct VNet or LAW access required                                   │
+│  ✓ No secrets or function keys required                                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -171,7 +172,7 @@ Understanding the exact data flow is key to this pattern. Here's how a query tra
 ```
 Azure SRE Agent (cloud service, outside VNet)
         │
-        │ HTTPS call with Function Key
+        │ HTTPS call with Bearer Token (Easy Auth)
         ▼
 Azure Function (func-law-query-ampls-demo)
         │
@@ -206,7 +207,7 @@ Log Analytics Workspace (law-originations-ampls-demo)
 | **Private Endpoint** | Inside VNet (`endpoints` subnet) | Connects to AMPLS, enables private network path to Log Analytics |
 | **AMPLS** | Originations RG | Links LAW to Private Endpoint, enforces PrivateOnly query mode |
 | **LAW** | Originations RG | Stores logs, blocks public queries, allows Private Endpoint queries |
-| **SRE Agent PythonTool** | Cloud (outside VNet) | Makes HTTP calls to Azure Function using Function Key |
+| **SRE Agent PythonTool** | Cloud (outside VNet) | Acquires Bearer Token via Managed Identity, calls Azure Function over HTTPS |
 
 ### The Key Insight
 
@@ -333,6 +334,7 @@ az resource update `
   --set properties.vnetRouteAllEnabled=true
 
 # Grant Log Analytics Reader role
+# IMPORTANT: Scope to the workspace resource, not the function app's resource group
 az role assignment create `
   --assignee-object-id $(az functionapp identity show ...) `
   --role "Log Analytics Reader" `
@@ -341,13 +343,56 @@ az role assignment create `
 
 ---
 
-### Step 5: Configure SRE Agent Subagent
+### Step 5: Configure Easy Auth (Microsoft Entra ID) on the Function App
 
-Create a specialized subagent that uses the Azure Function endpoints. This subagent will be invoked when users ask about querying private Log Analytics workspaces.
+Instead of function keys, we secure the Azure Function with **Easy Auth** (Microsoft Entra ID authentication). This eliminates the need to manage secrets—the SRE Agent authenticates using its Managed Identity.
+
+#### 5a. Set Function Auth Level to Anonymous
+
+Since Easy Auth handles authentication at the platform level, set `authLevel` to `anonymous` in each `function.json`:
+
+```json
+{
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "authLevel": "anonymous",
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "methods": ["get", "post"]
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "$return"
+    }
+  ]
+}
+```
+
+#### 5b. Enable Easy Auth via Azure Portal
+
+1. Navigate to your **Function App** in the Azure Portal
+2. Go to **Settings** → **Authentication**
+3. Click **Add identity provider**
+4. Select **Microsoft** as the identity provider
+5. Configure:
+   - **App registration type**: Create new
+   - **Supported account types**: Current tenant (single tenant)
+   - **Client assertion type**: Federated identity credential (recommended)
+   - **Restrict access**: Require authentication
+   - **Unauthenticated requests**: HTTP 401 Unauthorized
+6. Under **Allowed client applications**, add the SRE Agent's Managed Identity Client ID
+7. Click **Add**
+
+Note the **Application (client) ID** created—you'll need it for the PythonTool configuration.
+
+#### 5c. Configure SRE Agent Subagent
+
+Create a specialized subagent that uses the Azure Function endpoints with Easy Auth. The PythonTools acquire a Bearer Token from the SRE Agent's Managed Identity to authenticate.
 
 #### Subagent Definition
-
-Create the subagent YAML file in your agents directory:
 
 ```yaml
 api_version: azuresre.ai/v2
@@ -357,29 +402,31 @@ metadata:
   tags:
     - ampls
     - private-link
-    - log-analytics
+    - easy-auth
 spec:
   instructions: |
-    You are a specialized Site Reliability Engineer focused on querying Log Analytics 
-    workspaces that are protected by Azure Monitor Private Link Scope (AMPLS) with 
+    You are a specialized Site Reliability Engineer focused on querying Log Analytics
+    workspaces that are protected by Azure Monitor Private Link Scope (AMPLS) with
     private-only query access mode.
-    
+
     ## Architecture Pattern
-    This agent uses an Azure Function deployed in a VNet as a query proxy:
-    
-    SRE Agent → Azure Function (VNet-integrated) → Private Endpoint → AMPLS → LAW
-    
+    This agent uses an Azure Function deployed in a VNet as a query proxy, authenticated
+    via Easy Auth (Microsoft Entra ID) instead of function keys:
+
+    SRE Agent → (Bearer Token) → Azure Function (VNet-integrated) → Private Endpoint → AMPLS → LAW
+
     ## Available Tools
-    - PrivateLAW_QueryLogs: Execute KQL queries
-    - PrivateLAW_ListTables: List available tables
+    - PrivateLAW_QueryLogs: Execute KQL queries against the private LAW
+    - PrivateLAW_ListTables: List available tables and row counts
     - PrivateLAW_CheckVMHealth: Check VM heartbeat status
-    - PrivateLAW_AnalyzeErrors: Analyze error trends
-    
+    - PrivateLAW_AnalyzeErrors: Analyze error trends from Syslog
+
   handoffDescription: |
-    Hand off to this agent when the user needs to query Log Analytics workspaces 
+    Hand off to this agent when the user needs to query Log Analytics workspaces
     protected by Azure Monitor Private Link Scope (AMPLS) with private-only access.
-    This agent uses an Azure Function as a VNet-integrated query proxy.
-    
+    This agent uses an Azure Function as a VNet-integrated query proxy secured
+    with Easy Auth (Entra ID).
+
   tools:
     - PrivateLAW_QueryLogs
     - PrivateLAW_ListTables
@@ -387,9 +434,9 @@ spec:
     - PrivateLAW_AnalyzeErrors
 ```
 
-#### Tool Definitions (PythonTools)
+#### Tool Definitions (PythonTools with Easy Auth)
 
-Each tool calls the Azure Function endpoints using HTTP.
+Each tool acquires a Bearer Token from the SRE Agent's Managed Identity and calls the Azure Function endpoints.
 
 > ⚠️ **Critical**: PythonTools **must** use `def main(**kwargs)` as the function signature. Using `def execute(**kwargs)` will result in `NameError: main is not defined`.
 
@@ -402,36 +449,52 @@ metadata:
   tags:
     - ampls
     - private-link
+    - easy-auth
 spec:
   type: PythonTool
   toolMode: Auto
-  description: Execute KQL queries against a private Log Analytics workspace via AMPLS
+  description: Execute KQL queries against a private Log Analytics workspace via AMPLS using Easy Auth (Entra ID)
   functionCode: |
     import json
     import urllib.request
     import urllib.error
     import os
-    
-    def main(**kwargs):  # IMPORTANT: Must be 'main', not 'execute'
+
+    def main(**kwargs):
         query = kwargs.get('query', '')
         timespan = kwargs.get('timespan', 'P1D')
-        
+
         if not query:
             return {"error": "Query parameter is required"}
-        
-        # Get configuration from environment variables
-        # Replace with your Azure Function URL and key
-        function_url = os.environ.get('CROSS_SUB_AMPLS_FUNCTION_URL', 
-            'https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/query_logs')
-        function_key = os.environ.get('CROSS_SUB_AMPLS_FUNCTION_KEY', 
-            '<YOUR-FUNCTION-KEY>')
-        
+
+        # Replace with your Function App URL and App Registration Client ID
+        function_url = 'https://<YOUR-FUNCTION-APP>.azurewebsites.net/api/query_logs'
+        app_id = '<YOUR-APP-REGISTRATION-CLIENT-ID>'
+
+        # Acquire token from SRE Agent's managed identity
+        identity_endpoint = os.environ.get('IDENTITY_ENDPOINT', '')
+        identity_header = os.environ.get('IDENTITY_HEADER', '')
+
+        if not identity_endpoint or not identity_header:
+            return {"error": "Managed identity not available."}
+
+        token_url = f"{identity_endpoint}?api-version=2019-08-01&resource=api://{app_id}"
+        token_req = urllib.request.Request(token_url)
+        token_req.add_header('X-IDENTITY-HEADER', identity_header)
+
+        try:
+            with urllib.request.urlopen(token_req, timeout=10) as token_resp:
+                token_data = json.loads(token_resp.read().decode('utf-8'))
+                access_token = token_data.get('access_token', '')
+        except Exception as e:
+            return {"error": f"Failed to acquire token: {str(e)}"}
+
         headers = {
             'Content-Type': 'application/json',
-            'x-functions-key': function_key
+            'Authorization': f'Bearer {access_token}'
         }
         body = json.dumps({'query': query, 'timespan': timespan}).encode('utf-8')
-        
+
         try:
             req = urllib.request.Request(function_url, data=body, headers=headers, method='POST')
             with urllib.request.urlopen(req, timeout=60) as response:
@@ -452,14 +515,17 @@ spec:
       required: false
 ```
 
-#### Environment Variables
+#### How Easy Auth Token Acquisition Works
 
-Configure the SRE Agent environment with the Function URL and API key:
+The PythonTool runs inside the SRE Agent sandbox, which has a Managed Identity. The token acquisition flow:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `CROSS_SUB_AMPLS_FUNCTION_URL` | Azure Function base URL | `https://func-law-query.azurewebsites.net/api/query_logs` |
-| `CROSS_SUB_AMPLS_FUNCTION_KEY` | Function API key | `abc123...` |
+1. **PythonTool** reads `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` environment variables (set automatically by the SRE Agent runtime)
+2. **PythonTool** calls the identity endpoint with `resource=api://<app-id>` to get a Bearer Token
+3. **PythonTool** includes the token in the `Authorization: Bearer <token>` header
+4. **Easy Auth** on the Function App validates the token against the App Registration
+5. **Function App** executes the query using its own Managed Identity
+
+> 💡 **No secrets required**: Unlike function keys, Easy Auth uses Managed Identity tokens that are automatically rotated and never stored in code or configuration.
 
 #### PythonTool Requirements
 
@@ -468,59 +534,25 @@ Configure the SRE Agent environment with the Function URL and API key:
 | **Function Name** | Must be `def main(**kwargs)` - the runtime calls `main()` |
 | **Return Type** | JSON-serializable dict or list |
 | **Error Handling** | Wrap HTTP calls in try/except to return structured errors |
-| **Environment Variables** | Use `os.environ.get()` with fallbacks for demo environments |
-| **Secrets Management** | In production, use Key Vault; fallback keys are for demos only |
+| **Token Acquisition** | Use `IDENTITY_ENDPOINT` + `IDENTITY_HEADER` for managed identity tokens |
+| **App Registration** | Configure the App Registration Client ID as the token `resource` |
 
-#### Deploy via Azure Portal
+#### Deploy via srectl CLI
 
-You can create the subagent and tools directly in the Azure Portal:
+Apply the agent and tools using the SRE Agent CLI:
 
-**Step 1: Navigate to Subagent Builder**
+```powershell
+# Apply tool definitions
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_QueryLogs.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_ListTables.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_CheckVMHealth.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_AnalyzeErrors.yaml
 
-1. Open the [Azure Portal](https://portal.azure.com)
-2. Navigate to your **Azure SRE Agent** resource
-3. In the left sidebar, expand **Builder** and click **Subagent builder**
+# Apply agent definition
+srectl apply-yaml --file agents/EasyAuth/PrivateLAWQuery.yaml
+```
 
-**Step 2: Create the Subagent**
-
-1. Click **+ Create subagent**
-2. Fill in the subagent details:
-   - **Name**: `CrossSubscriptionAMPLS`
-   - **Description**: Query Log Analytics workspaces protected by AMPLS using Azure Function as cross-subscription proxy
-   - **Tags**: `ampls`, `cross-subscription`, `private-link`, `log-analytics`
-3. In the **Instructions** field, paste the agent instructions from the YAML above
-4. In the **Handoff Description** field, describe when to hand off to this agent
-5. Click **Save**
-
-**Step 3: Create the PythonTools**
-
-1. In the Subagent builder, click on your new subagent
-2. Click **+ Add tool** and select **PythonTool**
-3. For each tool (QueryLogs, ListTables, CheckVMHealth, AnalyzeErrors):
-   - **Name**: `CrossSubAMPLS_QueryLogs` (etc.)
-   - **Description**: Enter the tool description
-   - **Function Code**: Paste the Python code from the YAML examples above
-   - **Parameters**: Add the required parameters (query, timespan, etc.)
-4. Click **Save** after adding each tool
-
-**Step 4: Configure Environment Variables**
-
-In the PythonTool code, you'll need to configure:
-
-| Variable | Description | How to Get It |
-|----------|-------------|---------------|
-| `CROSS_SUB_AMPLS_FUNCTION_URL` | Your Azure Function URL | Azure Portal → Function App → Overview → URL |
-| `CROSS_SUB_AMPLS_FUNCTION_KEY` | Function API key | Azure Portal → Function App → App keys → Host keys |
-
-> 💡 **Tip**: For demo purposes, you can hardcode these values in the PythonTool code. For production, use Azure Key Vault integration.
-
-**Step 5: Test the Subagent**
-
-1. Start a new chat in Azure SRE Agent
-2. Ask: "Use the CrossSubscriptionAMPLS subagent to list tables in my private Log Analytics workspace"
-3. Verify the agent hands off correctly and tools execute
-
-Now when users ask "get my logs for a resource that is within the private network", the meta agent will hand off to the PrivateLAWQuery subagent which queries via the Function proxy.
+Or deploy via the Azure Portal Builder UI.
 
 ---
 
@@ -548,7 +580,7 @@ This architecture maintains security while enabling AI-assisted investigation:
 | 🔐 **Log Analytics** | Public query access disabled, Private Link only |
 | 🔗 **Private Endpoint** | In isolated subnet with NSG rules |
 | 🪪 **Azure Function** | Managed Identity for LAW access (no secrets) |
-| 🔑 **API Authentication** | Function Key required for all calls |
+| 🔑 **API Authentication** | Easy Auth (Microsoft Entra ID) with Bearer Token—no secrets to manage |
 | 🌐 **VNet Routing** | `vnetRouteAllEnabled: true` for all traffic |
 | 📝 **Audit Trail** | All invocations logged in Application Insights |
 
@@ -561,7 +593,7 @@ This architecture maintains security while enabling AI-assisted investigation:
 | **SRE Agent Integration** | Custom HTTP tools | MCP tool |
 | **Protocol** | REST API | MCP Streamable HTTP |
 | **Hosting** | Azure Functions (EP1) | Container Apps |
-| **Authentication** | Function Key | API Key |
+| **Authentication** | Easy Auth (Entra ID Bearer Token) | API Key |
 | **Scaling** | Auto-scale (serverless) | Container-based |
 | **Cold Start** | ~1-2 seconds | Always-on option |
 | **Best For** | Simple query proxy | Rich tool ecosystem |
@@ -582,10 +614,18 @@ cd private-law-query-sample
 # Deploy with Azure Developer CLI (single subscription, two resource groups)
 azd up
 
+# Configure Easy Auth on the Function App (see Step 5 above)
+
 # Inject failures to generate logs
 ./inject-failure.ps1
 
-# Configure SRE Agent with the Function URL from the output
+# Deploy SRE Agent tools with srectl
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_QueryLogs.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_ListTables.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_CheckVMHealth.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAW_AnalyzeErrors.yaml
+srectl apply-yaml --file agents/EasyAuth/PrivateLAWQuery.yaml
+
 # Ask SRE Agent to investigate
 ```
 
@@ -610,7 +650,7 @@ This sample uses two resource groups; the same pattern works across subscription
 VNet-integrated Functions with Managed Identity can query private Log Analytics for SRE Agent.
 
 **🔒 Security is maintained**
-The workspace remains fully private; only the trusted Function can query it.
+The workspace remains fully private; only the trusted Function can query it. Easy Auth (Entra ID) eliminates the need to manage function keys—the SRE Agent authenticates with its Managed Identity.
 
 ---
 
@@ -633,4 +673,4 @@ The workspace remains fully private; only the trusted Function can query it.
 
 ---
 
-**Tags**: `Azure Monitor` `Private Link` `AMPLS` `Azure Functions` `Log Analytics` `VNet Integration` `SRE` `DevOps` `Security`
+**Tags**: `Azure Monitor` `Private Link` `AMPLS` `Azure Functions` `Log Analytics` `VNet Integration` `Easy Auth` `Entra ID` `SRE` `DevOps` `Security`

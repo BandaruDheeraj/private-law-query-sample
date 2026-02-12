@@ -1,0 +1,53 @@
+api_version: azuresre.ai/v2
+kind: ExtendedAgentTool
+metadata:
+  name: PrivateLAW_CheckVMHealth
+  tags:
+    - ampls
+    - private-link
+    - easy-auth
+spec:
+  type: PythonTool
+  toolMode: Auto
+  description: Check VM health in a private Log Analytics workspace via AMPLS using Easy Auth (Entra ID)
+  functionCode: |
+    import json
+    import urllib.request
+    import urllib.error
+    import os
+
+    def main(**kwargs):
+        function_url = 'https://func-law-query-easyauth-test.azurewebsites.net/api/check_vm_health'
+        app_id = 'b7d37e65-5fcc-4589-a614-21d2c67ae275'
+
+        identity_endpoint = os.environ.get('IDENTITY_ENDPOINT', '')
+        identity_header = os.environ.get('IDENTITY_HEADER', '')
+
+        if not identity_endpoint or not identity_header:
+            return {"error": "Managed identity not available."}
+
+        token_url = f"{identity_endpoint}?api-version=2019-08-01&resource=api://{app_id}"
+        token_req = urllib.request.Request(token_url)
+        token_req.add_header('X-IDENTITY-HEADER', identity_header)
+
+        try:
+            with urllib.request.urlopen(token_req, timeout=10) as token_resp:
+                token_data = json.loads(token_resp.read().decode('utf-8'))
+                access_token = token_data.get('access_token', '')
+        except Exception as e:
+            return {"error": f"Failed to acquire token: {str(e)}"}
+
+        headers = {
+            'Authorization': f'Bearer {access_token}'
+        }
+
+        try:
+            req = urllib.request.Request(function_url, headers=headers, method='GET')
+            with urllib.request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode('utf-8') if e.fp else str(e)
+            return {"error": f"HTTP {e.code}: {error_body}", "status": "failed"}
+        except Exception as e:
+            return {"error": f"Unexpected error: {str(e)}", "status": "failed"}
+  parameters: []
