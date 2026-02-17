@@ -151,7 +151,7 @@ After `azd up` completes, configure Easy Auth (Microsoft Entra ID) on the Functi
 4. Add the SRE Agent's Managed Identity Client ID as an allowed client application
 5. Note the **Application (client) ID** for your PythonTool configuration
 
-See the [blog post](blog-post.md) for detailed step-by-step instructions.
+See the [blog post](https://techcommunity.microsoft.com/blog/appsonazureblog/how-azure-sre-agent-can-investigate-resources-in-a-private-network/4494911) for detailed step-by-step instructions.
 
 ## Alternative: Step-by-Step Deployment
 
@@ -320,13 +320,11 @@ Open Azure SRE Agent and ask:
 | File | Description |
 |------|-------------|
 | `azure.yaml` | Azure Developer CLI manifest |
-| `deploy-sample.ps1` | Full environment deployment |
-| `inject-failure.ps1` | Simulate application issues |
-| `fix-issue.ps1` | Apply remediation |
-| `cleanup.ps1` | Delete all resources |
+| `scripts/inject-failure.ps1` | Simulate application issues |
+| `scripts/fix-issue.ps1` | Apply remediation |
+| `scripts/cleanup.ps1` | Delete all resources |
 | `infra/` | Bicep infrastructure modules |
 | `src/log-analytics-function/` | Azure Functions source code |
-| `blog-post.md` | Full tutorial article |
 
 ## SRE Agent Integration Files
 
